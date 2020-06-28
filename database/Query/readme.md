@@ -47,8 +47,21 @@ A: 对于QueryContext而言其生命周期是一问一答，如果没有答完�
 + rows.Err由于rows.Next可能在读取中遇到了异常，用于捕获该错误
 ## 源码解析
 ### QueryContext
-#### 相关接口
-+ 查询相关
+
+#### 流程说明
+1. 从db连接中获取连接一个Conn：db.conn
+2. 尝试该链接是否实现QueryerContext或者Queryer，转第3步，否则转第7步
+3. 如果实现QueryerContext或者Queryer
+4. driverArgsConnLocked进行args参数转换，将sql语句参数和其他参数分离
+5. ctxDriverQuery进行查询返回结果rows
+6. initContextClose开启携程awaitDone监听ctx是否结束，之后结束
+7. driverArgsConnLocked进行args参数转换，将sql语句参数和其他参数分离
+8. ctxDriverPrepare进行Prepare(query string) (Stmt, error)
+9. rowsiFromStatement进行查询返回结果rows
+10. 开启携程awaitDone监听ctx是否结束，之后结束
+
+
+#### 查询相关
 ```golang
 // QueryerContext is an optional interface that may be implemented by a Conn.
 //
@@ -133,9 +146,28 @@ type Stmt interface {
 	// Deprecated: Drivers should implement StmtQueryContext instead (or additionally).
 	Query(args []Value) (Rows, error)
 }
-```
 
-+ args 参数相关
+// StmtQueryContext enhances the Stmt interface by providing Query with context.
+type StmtQueryContext interface {
+	// QueryContext executes a query that may return rows, such as a
+	// SELECT.
+	//
+	// QueryContext must honor the context timeout and return when it is canceled.
+	QueryContext(ctx context.Context, args []NamedValue) (Rows, error)
+}
+```
+数据库驱动库都会实现Conn/Stmt/StmtQueryContext，大多数驱动库同时Queryer/QueryerContext
+##### 驱动实现举例
+
+###### 优先使用QueryerContext/Queryer
++ github.com/go-sql-driver/mysql
++ github.com/lib/pq
+###### 只使用Conn/Stmt/StmtQueryContext
++ github.com/godror/godror，需要注意的是其使用了Prepare/QueryContext的方式实现了对应的库
+
+##### args 参数相关
+args可以通过NamedValueChecker以及ColumnConverter，给本次查询加入参数，单独对本次查询进行配置
+
 ```golang
 // NamedValueChecker may be optionally implemented by Conn or Stmt. It provides
 // the driver more control to handle Go and database types beyond the default
@@ -172,7 +204,6 @@ type ColumnConverter interface {
 	ColumnConverter(idx int) ValueConverter
 }
 
-
 // ValueConverter is the interface providing the ConvertValue method.
 //
 // Various implementations of ValueConverter are provided by the
@@ -195,15 +226,118 @@ type ValueConverter interface {
 }
 ```
 
-#### 流程说明
-1. 从db连接中获取连接一个Conn
-2. 尝试该链接是否实现QueryerContext或者Queryer，转第3步，否则转第7步
-3. 如果实现QueryerContext或者Queryer
-4. 进行args参数转换，将sql语句参数和其他参数分离
-5. 进行查询返回结果rows
-6. 开启携程监听ctx是否结束，之后结束
-7. 进行args参数转换，将sql语句参数和其他参数分离
-8. 进行Prepare(query string) (Stmt, error)
-9. 进行查询返回结果rows
-10. 开启携程监听ctx是否结束，之后结束
+###### 驱动实现举例
+github.com/godror/godror通过NamedValueChecker对本次查询单独加入参数
+```golang
+// CheckNamedValue is called before passing arguments to the driver
+// and is called in place of any ColumnConverter. CheckNamedValue must do type
+// validation and conversion as appropriate for the driver.
+//
+// If CheckNamedValue returns ErrRemoveArgument, the NamedValue will not be included
+// in the final query arguments.
+// This may be used to pass special options to the query itself.
+//
+// If ErrSkip is returned the column converter error checking path is used
+// for the argument.
+// Drivers may wish to return ErrSkip after they have exhausted their own special cases.
+func (st *statement) CheckNamedValue(nv *driver.NamedValue) error {
+	if nv == nil {
+		return nil
+	}
+	if apply, ok := nv.Value.(Option); ok {
+		if apply != nil {
+			apply(&st.stmtOptions)
+		}
+		return driver.ErrRemoveArgument
+	}
+	return nil
+}
+```
 
+#### Rows
+
+##### 相关接口
+
+```golang
+// Rows is an iterator over an executed query's results.
+type Rows interface {
+   // Columns returns the names of the columns. The number of
+   // columns of the result is inferred from the length of the
+   // slice. If a particular column name isn't known, an empty
+   // string should be returned for that entry.
+   Columns() []string
+
+   // Close closes the rows iterator.
+   Close() error
+
+   // Next is called to populate the next row of data into
+   // the provided slice. The provided slice will be the same
+   // size as the Columns() are wide.
+   //
+   // Next should return io.EOF when there are no more rows.
+   //
+   // The dest should not be written to outside of Next. Care
+   // should be taken when closing Rows not to modify
+   // a buffer held in dest.
+   Next(dest []Value) error
+}
+
+// RowsNextResultSet extends the Rows interface by providing a way to signal
+// the driver to advance to the next result set.
+type RowsNextResultSet interface {
+	Rows
+
+	// HasNextResultSet is called at the end of the current result set and
+	// reports whether there is another result set after the current one.
+	HasNextResultSet() bool
+
+	// NextResultSet advances the driver to the next result set even
+	// if there are remaining rows in the current result set.
+	//
+	// NextResultSet should return io.EOF when there are no more result sets.
+	NextResultSet() error
+}
+```
+
+##### Columns
+Columns通过Rows的Columns() []string来获取列信息
+##### Next
+
+Next函数通过Rows的Next(dest []Value) error读取网络上的下一行数据，如果存在网路错误或者数据库错误，则需要通过Err返回错误并且返回false，然后通过RowsNextResultSet的HasNextResultSet() bool判断是否存在下一行数据。
+
+##### Scan
+
+该函数仅仅通过convertAssignRows进行类型调整，对于基本类型进行调整，不是从网络上直接扫描读取下一行数据。另外，用户可以通过Scanner的 Scan(src interface{}) error可以对已经得到的数据进行类型转化控制。
+
+```golang
+// Scanner is an interface used by Scan.
+type Scanner interface {
+   // Scan assigns a value from a database driver.
+   //
+   // The src value will be of one of the following types:
+   //
+   //    int64
+   //    float64
+   //    bool
+   //    []byte
+   //    string
+   //    time.Time
+   //    nil - for NULL values
+   //
+   // An error should be returned if the value cannot be stored
+   // without loss of information.
+   //
+   // Reference types such as []byte are only valid until the next call to Scan
+   // and should not be retained. Their underlying memory is owned by the driver.
+   // If retention is necessary, copy their values before the next call to Scan.
+   Scan(src interface{}) error
+}
+```
+
+##### Err
+
+较为重要的作用是获取Next中读取网络数据的错误以及context到期的错误。
+
+##### Close
+
+rows关闭，释放连接资源。
