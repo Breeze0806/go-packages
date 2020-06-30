@@ -1,5 +1,5 @@
 # Query
-这里我们讲的是select等需要返回结果的语句的执行接口，为了使得代码更具有可读性，我把原文中的注释也挪了进来，方便阅读。
+这里我们讲的是select等需要返回结果集的语句的执行接口，为了使得代码更具有可读性，我把原文中的注释也挪了进来，方便阅读。
 ## 高能预警
 如果你使用不是上述类型语句去执行操作，那么Query可能会一直堵塞,而QueryContext也可能因为ctx没有被cancel而堵塞。
 ## 常用使用方式分析
@@ -45,5 +45,5 @@
 + rows.Err由于rows.Next可能在读取中遇到了异常，用于捕获该错误
 ## 源码解析
 
-- [QueryContext的源码分析](QueryContext/readme.md)
-- [Rows的源码分析]((Rows/readme.md))
+- [QueryContext的源码分析](QueryContext/readme.md),目前基于go1.13
+- [Rows的源码分析]((Rows/readme.md)),目前基于go1.13

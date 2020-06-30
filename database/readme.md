@@ -5,6 +5,15 @@ database/sql是golang标准库的数据库接口框架，类似于java的jdbc接
 + driver包则定义了用于sql包逻辑的驱动程序的接口，各数据库驱动程序需要根据自身数据库的特性去实现全部或者部分接口。
 
 ## 查询
-[Qurey的相关分析](Query/readme.md)
+[查询的相关分析](Query/readme.md),目前基于go1.13
 
-### 样例可以查看example_test.go的QueryMuch以及QueryOne
+### 样例
+可以查看example_test.go的QueryMuch以及QueryOne
+
+## 执行
+
+[执行的相关分析](Exec/readme.md),目前基于go1.13
+
+### 样例
+
+可以查看example_test.go的Exec
